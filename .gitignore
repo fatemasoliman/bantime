@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+*.sqlite3
+*.db
+venv/
+.envrc
+.DS_Store
+route_map.html
+input_results.csv
