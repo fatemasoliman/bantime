@@ -2,18 +2,18 @@ import argparse
 import os
 import pandas as pd
 import openrouteservice
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dt_time
 from dateutil import tz
 import math
-import folium
 
 # Constants
 BAN_CSV = "ban_times.csv"
 BAN_RADIUS_KM = 50  # Ban area radius in kilometers
 SAUDI_TZ = tz.gettz('Asia/Riyadh')  # Saudi Arabia timezone
+DEFAULT_SPEED_KMPH = 20.0  # Default driving speed
 
-# Haversine function to compute distance between two lat/lon points in km
 def haversine(lat1, lon1, lat2, lon2):
+    """Calculate the great circle distance between two points on Earth (in km)."""
     R = 6371  # Earth radius in km
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
@@ -21,286 +21,171 @@ def haversine(lat1, lon1, lat2, lon2):
     a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
     return 2 * R * math.asin(math.sqrt(a))
 
-# Parse time string (e.g., '6:00') into datetime.time
-from datetime import time as dt_time
-
 def parse_time(tstr):
-    h, m = map(int, tstr.split(":"))
+    """Parse time string (e.g., '6:00') into datetime.time object."""
+    h, m = map(int, str(tstr).split(":"))
     return dt_time(h, m)
 
-# Given a weekday and ban row, get ban start and end datetime objects for the trip date
-def get_ban_window(trip_date, ban_row):
-    # trip_date: datetime.date
-    start_time = parse_time(str(ban_row['Time_Start']))
-    end_time = parse_time(str(ban_row['Time_End']))
-    start_dt = datetime.combine(trip_date, start_time, tzinfo=SAUDI_TZ)
-    end_dt = datetime.combine(trip_date, end_time, tzinfo=SAUDI_TZ)
-    # Handle overnight ban windows (e.g., 23:00 to 01:00)
-    if end_dt <= start_dt:
-        end_dt += timedelta(days=1)
-    return start_dt, end_dt
-
-# Check if a point is within BAN_RADIUS_KM of a ban area
 def point_in_ban_area(lat, lon, ban_lat, ban_lon, radius_km=BAN_RADIUS_KM):
+    """Check if a point is within the ban area radius."""
     return haversine(lat, lon, ban_lat, ban_lon) <= radius_km
-
-BAN_CSV = "ban_times.csv"
-
 
 def load_ban_areas(csv_path):
     """Load ban areas from CSV into a DataFrame."""
-    df = pd.read_csv(csv_path)
-    return df
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError(f"Ban areas CSV file not found: {csv_path}")
+    return pd.read_csv(csv_path)
 
+def get_route_from_ors(client, start_lat, start_lon, end_lat, end_lon):
+    """Get route from OpenRouteService API."""
+    coords = [(start_lon, start_lat), (end_lon, end_lat)]
+    try:
+        route = client.directions(coords, profile='driving-car', format='geojson', instructions=False)
+        return route
+    except Exception as e:
+        raise Exception(f"Error fetching route from OpenRouteService: {e}")
 
-def main():
-    parser = argparse.ArgumentParser(description="Estimate ETA with temporal ban area restrictions.")
-    parser.add_argument("--start-lat", type=float, required=True, help="Start latitude")
-    parser.add_argument("--start-lon", type=float, required=True, help="Start longitude")
-    parser.add_argument("--end-lat", type=float, required=True, help="End latitude")
-    parser.add_argument("--end-lon", type=float, required=True, help="End longitude")
-    parser.add_argument("--start-datetime", type=str, required=True, help="Start datetime in ISO format (e.g. 2025-07-02T23:31:50+03:00)")
-    parser.add_argument("--ors-api-key", type=str, default=os.getenv("ORS_API_KEY"), help="OpenRouteService API key (or set ORS_API_KEY env var)")
-    args = parser.parse_args()
-
+def calculate_eta_with_bans(start_lat, start_lon, end_lat, end_lon, start_datetime, ors_api_key, vehicle_key=None, key=None):
+    """
+    Calculate ETA considering ban areas along the route.
+    This is the unified function used by both CLI and API.
+    """
     # Load ban areas
     ban_df = load_ban_areas(BAN_CSV)
-    # Parse trip start datetime
-    start_dt = datetime.fromisoformat(args.start_datetime)
+    
+    # Parse and normalize start datetime
+    start_dt = datetime.fromisoformat(start_datetime)
     if start_dt.tzinfo is None:
         start_dt = start_dt.replace(tzinfo=SAUDI_TZ)
     else:
         start_dt = start_dt.astimezone(SAUDI_TZ)
-    trip_date = start_dt.date()
-    trip_weekday = start_dt.strftime('%A')
-
-    # Prepare OpenRouteService client
-    client = openrouteservice.Client(key=args.ors_api_key)
-    coords = [(args.start_lon, args.start_lat), (args.end_lon, args.end_lat)]
-    # Request route with geometry and segment info
-    try:
-        route = client.directions(coords, profile='driving-car', format='geojson', instructions=False)
-    except Exception as e:
-        print(f"Error fetching route: {e}")
-        return
+    
+    # Get route from OpenRouteService
+    client = openrouteservice.Client(key=ors_api_key)
+    route = get_route_from_ors(client, start_lat, start_lon, end_lat, end_lon)
+    
+    # Extract route geometry
     geometry = route['features'][0]['geometry']['coordinates']  # list of [lon, lat]
     segments = geometry
-    # Get total route distance and duration
-    summary = route['features'][0]['properties']['summary']
-    total_distance = summary['distance']  # meters
-    total_duration = summary['duration']  # seconds
-
-    # Prepare ban windows for the trip day
-    ban_windows = []
+    
+    # Prepare ban areas data structure
+    ban_areas = []
     for _, row in ban_df.iterrows():
-        if row['Day_of_Week'] == trip_weekday:
-            ban_lat, ban_lon = float(row['Latitude']), float(row['Longitude'])
-            start_ban, end_ban = get_ban_window(trip_date, row)
-            ban_windows.append({
-                'city': row['City'],
-                'start': start_ban,
-                'end': end_ban,
-                'lat': ban_lat,
-                'lon': ban_lon
-            })
-
-    # Walk along the route, checking for ban area entry
-    # We'll assume constant speed between points for ETA estimation
+        ban_areas.append({
+            'city': row['City'],
+            'lat': float(row['Latitude']),
+            'lon': float(row['Longitude']),
+            'day_of_week': row['Day_of_Week'],
+            'time_start': str(row['Time_Start']),
+            'time_end': str(row['Time_End'])
+        })
+    
+    # Walk along the route, checking for ban area encounters
     delays = []
     current_time = start_dt
     last_point = segments[0]
-    distance_travelled = 0
+    
     for i in range(1, len(segments)):
         p1 = last_point
         p2 = segments[i]
+        
+        # Calculate segment distance and travel time
         seg_dist = haversine(p1[1], p1[0], p2[1], p2[0])  # in km
-        # Use fixed speed of 20 km/h for ETA calculation
-        speed_kmph = 20.0
-        seg_time = timedelta(hours=seg_dist / speed_kmph)
+        seg_time = timedelta(hours=seg_dist / DEFAULT_SPEED_KMPH)
         eta_to_seg = current_time + seg_time
-        # Check each ban area
-        for ban in ban_windows:
-            # If segment enters ban area
-            if point_in_ban_area(p2[1], p2[0], ban['lat'], ban['lon']):
-                # If ETA falls within ban window, add wait
-                if ban['start'] <= eta_to_seg <= ban['end']:
-                    wait = ban['end'] - eta_to_seg
-                    current_time = ban['end']
-                    delays.append({
-                    'city': ban['city'],
-                    'wait': wait,
-                    'ban_start': ban['start'],
-                    'ban_end': ban['end'],
-                    'eta_at_ban': eta_to_seg,
-                    'lat': ban['lat'],
-                    'lon': ban['lon'],
-                    'stop_lat': p2[1],
-                    'stop_lon': p2[0]
-                })
-                # Only delay once per ban area
-                ban_windows.remove(ban)
-                break
-        current_time += seg_time
-        last_point = p2
-        distance_travelled += seg_dist
-    # Output results
-    print(f"\nEstimated ETA: {current_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-    if delays:
-        print("Delays encountered:")
-        for d in delays:
-            # Round up wait to nearest minute
-            wait_minutes = int((d['wait'].total_seconds() + 59) // 60)
-            print(f" - City: {d['city']}, Wait: {wait_minutes} min, ETA at Ban: {d['eta_at_ban'].strftime('%H:%M')}, Ban Window: {d['ban_start'].strftime('%H:%M')} to {d['ban_end'].strftime('%H:%M')}")
-    else:
-        print("No ban area delays encountered.")
-
-    # Print schedule
-    print("\n=== Trip Schedule ===")
-    print(f"START:   {start_dt.strftime('%Y-%m-%d %H:%M')} at ({args.start_lat:.4f}, {args.start_lon:.4f})")
-    last_time = start_dt
-    last_lat = args.start_lat
-    last_lon = args.start_lon
-    for d in delays:
-        print(f"BAN ARR: {d['eta_at_ban'].strftime('%Y-%m-%d %H:%M')} at ({d['stop_lat']:.4f}, {d['stop_lon']:.4f}) [{d['city']}] (wait {int((d['wait'].total_seconds() + 59) // 60)} min)")
-        print(f"BAN DEP: {(d['eta_at_ban'] + d['wait']).strftime('%Y-%m-%d %H:%M')} at ({d['stop_lat']:.4f}, {d['stop_lon']:.4f}) [{d['city']}]")
-        last_time = d['eta_at_ban'] + d['wait']
-        last_lat = d['stop_lat']
-        last_lon = d['stop_lon']
-    print(f"END:     {current_time.strftime('%Y-%m-%d %H:%M')} at ({args.end_lat:.4f}, {args.end_lon:.4f})")
-
-    # --- Route Visualization ---
-    # Center map between start and end
-    mid_lat = (args.start_lat + args.end_lat) / 2
-    mid_lon = (args.start_lon + args.end_lon) / 2
-    m = folium.Map(location=[mid_lat, mid_lon], zoom_start=6)
-
-    # Draw route polyline
-    folium.PolyLine([(lat, lon) for lon, lat in segments], color="blue", weight=5, opacity=0.7).add_to(m)
-
-    # Mark start and end
-    folium.Marker(
-        [args.start_lat, args.start_lon],
-        popup=f"Start ({args.start_lat:.4f}, {args.start_lon:.4f})",
-        icon=folium.Icon(color="green", icon="play")
-    ).add_to(m)
-    folium.Marker(
-        [args.end_lat, args.end_lon],
-        popup=f"End ({args.end_lat:.4f}, {args.end_lon:.4f})",
-        icon=folium.Icon(color="red", icon="stop")
-    ).add_to(m)
-
-    # Mark ban stops at the actual stop location
-    for d in delays:
-        wait_minutes = int((d['wait'].total_seconds() + 59) // 60)
-        departure_time = (d['eta_at_ban'] + d['wait']).strftime('%Y-%m-%d %H:%M')
-        folium.CircleMarker(
-            location=[d['stop_lat'], d['stop_lon']],
-            radius=14,
-            color="orange",
-            fill=True,
-            fill_color="red",
-            fill_opacity=0.95,
-            tooltip=f"Ban Stop: {d['city']}",
-            popup=folium.Popup(
-                f"<b>Ban Stop: {d['city']}</b><br>"
-                f"Arrival: {d['eta_at_ban'].strftime('%Y-%m-%d %H:%M')}<br>"
-                f"Departure: {departure_time}<br>"
-                f"Wait: {wait_minutes} min<br>"
-                f"Ban Window: {d['ban_start'].strftime('%H:%M')} - {d['ban_end'].strftime('%H:%M')}",
-                max_width=300
-            )
-        ).add_to(m)
-    # Save map
-    m.save("route_map.html")
-    print("Route map saved as route_map.html. Open this file in your browser to view the route and ban stops.")
-
-def estimate_trip(args, vehicle_key=None, key=None):
-    # Load ban areas
-    ban_df = load_ban_areas(BAN_CSV)
-    # Parse trip start datetime
-    start_dt = datetime.fromisoformat(args.start_datetime)
-    if start_dt.tzinfo is None:
-        start_dt = start_dt.replace(tzinfo=SAUDI_TZ)
-    else:
-        start_dt = start_dt.astimezone(SAUDI_TZ)
-    trip_date = start_dt.date()
-    trip_weekday = start_dt.strftime('%A')
-
-    # Prepare OpenRouteService client
-    client = openrouteservice.Client(key=args.ors_api_key)
-    coords = [(args.start_lon, args.start_lat), (args.end_lon, args.end_lat)]
-    # Request route with geometry and segment info
-    try:
-        route = client.directions(coords, profile='driving-car', format='geojson', instructions=False)
-    except Exception as e:
-        return [{
-            'vehicle_key': vehicle_key,
-        'key': key,
-            'event': 'error',
-            'message': f'Error fetching route: {e}'
-        }]
-    geometry = route['features'][0]['geometry']['coordinates']  # list of [lon, lat]
-    segments = geometry
-    # Get total route distance and duration
-    summary = route['features'][0]['properties']['summary']
-    total_distance = summary['distance']  # meters
-    total_duration = summary['duration']  # seconds
-
-    # Prepare ban windows for the trip day
-    ban_windows = []
-    for _, row in ban_df.iterrows():
-        if row['Day_of_Week'] == trip_weekday:
-            ban_lat, ban_lon = float(row['Latitude']), float(row['Longitude'])
-            start_ban, end_ban = get_ban_window(trip_date, row)
-            ban_windows.append({
-                'city': row['City'],
-                'start': start_ban,
-                'end': end_ban,
-                'lat': ban_lat,
-                'lon': ban_lon
-            })
-
-    # Walk along the route, checking for ban area entry
-    delays = []
-    current_time = start_dt
-    last_point = segments[0]
-    for i in range(1, len(segments)):
-        p1 = last_point
-        p2 = segments[i]
-        seg_dist = haversine(p1[1], p1[0], p2[1], p2[0])  # in km
-        seg_time = timedelta(seconds=(seg_dist * 1000) / total_distance * total_duration)
-        eta_to_seg = current_time + seg_time
-        for ban in ban_windows:
-            if point_in_ban_area(p2[1], p2[0], ban['lat'], ban['lon']):
-                if ban['start'] <= eta_to_seg <= ban['end']:
-                    wait = ban['end'] - eta_to_seg
-                    current_time = ban['end']
+        
+        # Check for ban area encounters at this segment
+        ban_hit = False
+        for ban in ban_areas:
+            in_ban = point_in_ban_area(p2[1], p2[0], ban['lat'], ban['lon'])
+            eta_weekday = eta_to_seg.strftime('%A')
+            
+            if in_ban and eta_weekday == ban['day_of_week']:
+                # Calculate ban window for this specific date
+                ban_start = datetime.combine(
+                    eta_to_seg.date(), 
+                    parse_time(ban['time_start']), 
+                    tzinfo=SAUDI_TZ
+                )
+                ban_end = datetime.combine(
+                    eta_to_seg.date(), 
+                    parse_time(ban['time_end']), 
+                    tzinfo=SAUDI_TZ
+                )
+                
+                # Handle overnight ban windows
+                if ban_end <= ban_start:
+                    ban_end += timedelta(days=1)
+                
+                # Check if ETA falls within ban window
+                if ban_start <= eta_to_seg <= ban_end:
+                    wait = ban_end - eta_to_seg
                     delays.append({
                         'city': ban['city'],
                         'wait': wait,
-                        'ban_start': ban['start'],
-                        'ban_end': ban['end'],
+                        'ban_start': ban_start,
+                        'ban_end': ban_end,
                         'eta_at_ban': eta_to_seg,
                         'lat': ban['lat'],
                         'lon': ban['lon'],
                         'stop_lat': p2[1],
                         'stop_lon': p2[0]
                     })
-                    ban_windows.remove(ban)
+                    current_time = ban_end
+                    ban_hit = True
                     break
-        current_time += seg_time
+        
+        if not ban_hit:
+            current_time = eta_to_seg
+        
         last_point = p2
-
-    # Prepare schedule output as list of dicts
+    
+    # Final check: If end point is inside a ban area during a ban window
+    for ban in ban_areas:
+        in_ban = point_in_ban_area(end_lat, end_lon, ban['lat'], ban['lon'])
+        eta_weekday = current_time.strftime('%A')
+        
+        if in_ban and eta_weekday == ban['day_of_week']:
+            ban_start = datetime.combine(
+                current_time.date(), 
+                parse_time(ban['time_start']), 
+                tzinfo=SAUDI_TZ
+            )
+            ban_end = datetime.combine(
+                current_time.date(), 
+                parse_time(ban['time_end']), 
+                tzinfo=SAUDI_TZ
+            )
+            
+            if ban_end <= ban_start:
+                ban_end += timedelta(days=1)
+            
+            if ban_start <= current_time <= ban_end:
+                wait = ban_end - current_time
+                delays.append({
+                    'city': ban['city'],
+                    'wait': wait,
+                    'ban_start': ban_start,
+                    'ban_end': ban_end,
+                    'eta_at_ban': current_time,
+                    'lat': ban['lat'],
+                    'lon': ban['lon'],
+                    'stop_lat': end_lat,
+                    'stop_lon': end_lon
+                })
+                current_time = ban_end
+    
+    # Build schedule for API response
     schedule = []
+    
     # Start event
     schedule.append({
         'vehicle_key': vehicle_key,
         'key': key,
         'event': 'start',
         'time': start_dt.strftime('%Y-%m-%d %H:%M'),
-        'lat': args.start_lat,
-        'lon': args.start_lon,
+        'lat': start_lat,
+        'lon': start_lon,
         'city': '',
         'wait_minutes': '',
         'ban_arrival': '',
@@ -312,12 +197,13 @@ def estimate_trip(args, vehicle_key=None, key=None):
         'end_lat': '',
         'end_lon': ''
     })
+    
     # Ban events
     for d in delays:
-        wait_minutes = int((d['wait'].total_seconds() + 59) // 60)
+        wait_minutes = int((d['wait'].total_seconds() + 59) // 60)  # Round up to nearest minute
         schedule.append({
             'vehicle_key': vehicle_key,
-        'key': key,
+            'key': key,
             'event': 'ban',
             'time': d['eta_at_ban'].strftime('%Y-%m-%d %H:%M'),
             'lat': d['stop_lat'],
@@ -333,14 +219,15 @@ def estimate_trip(args, vehicle_key=None, key=None):
             'end_lat': '',
             'end_lon': ''
         })
+    
     # End event
     schedule.append({
         'vehicle_key': vehicle_key,
         'key': key,
         'event': 'end',
         'time': current_time.strftime('%Y-%m-%d %H:%M'),
-        'lat': args.end_lat,
-        'lon': args.end_lon,
+        'lat': end_lat,
+        'lon': end_lon,
         'city': '',
         'wait_minutes': '',
         'ban_arrival': '',
@@ -349,45 +236,140 @@ def estimate_trip(args, vehicle_key=None, key=None):
         'ban_lon': '',
         'ban_city': '',
         'end_time': current_time.strftime('%Y-%m-%d %H:%M'),
-        'end_lat': args.end_lat,
-        'end_lon': args.end_lon
+        'end_lat': end_lat,
+        'end_lon': end_lon
     })
-    return schedule
+    
+    return {
+        'eta': current_time,
+        'schedule': schedule,
+        'delays': delays
+    }
+
+
+
+def print_trip_results(result, start_lat, start_lon, end_lat, end_lon, start_datetime):
+    """Print formatted trip results for CLI."""
+    eta = result['eta']
+    delays = result['delays']
+    
+    print(f"\nEstimated ETA: {eta.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    
+    if delays:
+        print("Delays encountered:")
+        for d in delays:
+            wait_minutes = int((d['wait'].total_seconds() + 59) // 60)
+            print(f" - City: {d['city']}, Wait: {wait_minutes} min, "
+                  f"ETA at Ban: {d['eta_at_ban'].strftime('%H:%M')}, "
+                  f"Ban Window: {d['ban_start'].strftime('%H:%M')} to {d['ban_end'].strftime('%H:%M')}")
+    else:
+        print("No ban area delays encountered.")
+    
+    # Print detailed schedule
+    print("\n=== Trip Schedule ===")
+    start_dt = datetime.fromisoformat(start_datetime)
+    if start_dt.tzinfo is None:
+        start_dt = start_dt.replace(tzinfo=SAUDI_TZ)
+    else:
+        start_dt = start_dt.astimezone(SAUDI_TZ)
+    
+    print(f"START:   {start_dt.strftime('%Y-%m-%d %H:%M')} at ({start_lat:.4f}, {start_lon:.4f})")
+    
+    for d in delays:
+        wait_minutes = int((d['wait'].total_seconds() + 59) // 60)
+        print(f"BAN ARR: {d['eta_at_ban'].strftime('%Y-%m-%d %H:%M')} at ({d['stop_lat']:.4f}, {d['stop_lon']:.4f}) [{d['city']}] (wait {wait_minutes} min)")
+        print(f"BAN DEP: {(d['eta_at_ban'] + d['wait']).strftime('%Y-%m-%d %H:%M')} at ({d['stop_lat']:.4f}, {d['stop_lon']:.4f}) [{d['city']}]")
+    
+    print(f"END:     {eta.strftime('%Y-%m-%d %H:%M')} at ({end_lat:.4f}, {end_lon:.4f})")
+
+def main():
+    """Main function for CLI usage."""
+    parser = argparse.ArgumentParser(description="Estimate ETA with temporal ban area restrictions.")
+    parser.add_argument("--start-lat", type=float, required=True, help="Start latitude")
+    parser.add_argument("--start-lon", type=float, required=True, help="Start longitude")
+    parser.add_argument("--end-lat", type=float, required=True, help="End latitude")
+    parser.add_argument("--end-lon", type=float, required=True, help="End longitude")
+    parser.add_argument("--start-datetime", type=str, required=True, help="Start datetime in ISO format")
+    parser.add_argument("--ors-api-key", type=str, default=os.getenv("ORS_API_KEY"), help="OpenRouteService API key")
+    parser.add_argument("--batch-csv", type=str, help="CSV file with multiple vehicle trips")
+    
+    args = parser.parse_args()
+    
+    if not args.ors_api_key:
+        print("Error: OpenRouteService API key is required. Set ORS_API_KEY environment variable or use --ors-api-key")
+        return
+    
+    if args.batch_csv:
+        process_batch_csv(args.batch_csv, args.ors_api_key)
+    else:
+        try:
+            result = calculate_eta_with_bans(
+                args.start_lat, args.start_lon, 
+                args.end_lat, args.end_lon,
+                args.start_datetime, args.ors_api_key
+            )
+            
+            print_trip_results(result, args.start_lat, args.start_lon, args.end_lat, args.end_lon, args.start_datetime)
+            
+        except Exception as e:
+            print(f"Error: {e}")
+
+def process_batch_csv(input_path, ors_api_key):
+    """Process multiple trips from a CSV file."""
+    output_path = input_path.replace('.csv', '_results.csv')
+    df = pd.read_csv(input_path)
+    results = []
+    
+    for idx, row in df.iterrows():
+        try:
+            vehicle_key = row.get('vehicle_key', idx)
+            key = row.get('key', '')
+            
+            result = calculate_eta_with_bans(
+                row['start_lat'], row['start_lon'],
+                row['end_lat'], row['end_lon'],
+                row['start_datetime'], ors_api_key,
+                vehicle_key, key
+            )
+            
+            results.extend(result['schedule'])
+            
+        except Exception as e:
+            print(f"Error processing row {idx}: {e}")
+            # Add error record
+            results.append({
+                'vehicle_key': row.get('vehicle_key', idx),
+                'key': row.get('key', ''),
+                'event': 'error',
+                'message': str(e),
+                'time': '', 'lat': '', 'lon': '', 'city': '', 'wait_minutes': '',
+                'ban_arrival': '', 'ban_departure': '', 'ban_lat': '', 'ban_lon': '',
+                'ban_city': '', 'end_time': '', 'end_lat': '', 'end_lon': ''
+            })
+    
+    # Save results
+    out_df = pd.DataFrame(results)
+    out_df.to_csv(output_path, index=False)
+    print(f"Batch results written to {output_path}")
+
+# For backward compatibility with API
+def estimate_trip(args, vehicle_key=None, key=None):
+    """Legacy function for API compatibility."""
+    try:
+        result = calculate_eta_with_bans(
+            args.start_lat, args.start_lon,
+            args.end_lat, args.end_lon,
+            args.start_datetime, args.ors_api_key,
+            vehicle_key, key
+        )
+        return result['schedule']
+    except Exception as e:
+        return [{
+            'vehicle_key': vehicle_key,
+            'key': key,
+            'event': 'error',
+            'message': str(e)
+        }]
 
 if __name__ == "__main__":
-    import sys
-    parser = argparse.ArgumentParser(description="Estimate ETA with temporal ban area restrictions.")
-    parser.add_argument("--start-lat", type=float, help="Start latitude")
-    parser.add_argument("--start-lon", type=float, help="Start longitude")
-    parser.add_argument("--end-lat", type=float, help="End latitude")
-    parser.add_argument("--end-lon", type=float, help="End longitude")
-    parser.add_argument("--start-datetime", type=str, help="Start datetime in ISO format (e.g. 2025-07-02T23:31:50+03:00)")
-    parser.add_argument("--ors-api-key", type=str, default=os.getenv("ORS_API_KEY"), help="OpenRouteService API key (or set ORS_API_KEY env var)")
-    parser.add_argument("--batch-csv", type=str, default=None, help="CSV file with multiple vehicle trips (columns: vehicle_key,start_lat,start_lon,end_lat,end_lon,start_datetime)")
-    args = parser.parse_args()
-
-    if args.batch_csv:
-        import pandas as pd
-        input_path = args.batch_csv
-        output_path = input_path.replace('.csv', '_results.csv')
-        df = pd.read_csv(input_path)
-        results = []
-        for idx, row in df.iterrows():
-            class BatchArgs:
-                pass
-            batch_args = BatchArgs()
-            batch_args.start_lat = row['start_lat']
-            batch_args.start_lon = row['start_lon']
-            batch_args.end_lat = row['end_lat']
-            batch_args.end_lon = row['end_lon']
-            batch_args.start_datetime = row['start_datetime']
-            batch_args.ors_api_key = args.ors_api_key
-            vehicle_key = row['vehicle_key'] if 'vehicle_key' in row else idx
-            key = row['key'] if 'key' in row else ''
-            trip_results = estimate_trip(batch_args, vehicle_key, key)
-            results.extend(trip_results)
-        out_df = pd.DataFrame(results)
-        out_df.to_csv(output_path, index=False)
-        print(f"Batch results written to {output_path}")
-    else:
-        main()
+    main()

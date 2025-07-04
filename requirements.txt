@@ -2,3 +2,5 @@ openrouteservice
 pandas
 python-dateutil
 folium
+fastapi
+uvicorn
