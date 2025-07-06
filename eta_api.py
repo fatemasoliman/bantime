@@ -12,16 +12,31 @@ from eta_estimator import calculate_eta_with_bans
 
 app = FastAPI()
 
+from fastapi import Header
+
+from fastapi import Header
+
 @app.post("/eta")
-async def get_eta(trips: List[Dict[str, Any]]):
-    """Calculate ETAs for a batch of trips. Accepts a list of trip dicts as input."""
+async def get_eta(
+    trips: List[Dict[str, Any]],
+    x_ban_radius_km: float = Header(None, alias="X-Ban-Radius-Km"),
+    x_vehicle_speed_kmph: float = Header(None, alias="X-Vehicle-Speed-Kmph"),
+    x_ors_api_key: str = Header(None, alias="X-ORS-API-Key")
+):
+    """
+    Calculate ETAs for a batch of trips. Accepts a list of trip dicts as input.
+    Optional headers:
+    - X-Ban-Radius-Km: Override ban area radius (km)
+    - X-Vehicle-Speed-Kmph: Override vehicle speed (km/h)
+    - X-ORS-API-Key: Provide OpenRouteService API key (overrides env var)
+    """
     if not trips:
         raise HTTPException(status_code=400, detail="No trips provided.")
-    results = {}
-    # Use API key from first trip or from env as fallback
-    default_api_key = trips[0].get("ors_api_key") or os.getenv("ORS_API_KEY")
+    results = []
+    # Use API key from header, or env as fallback
+    default_api_key = x_ors_api_key or os.getenv("ORS_API_KEY")
     if not default_api_key:
-        raise HTTPException(status_code=400, detail="OpenRouteService API key is required. Provide in request or set ORS_API_KEY environment variable.")
+        raise HTTPException(status_code=400, detail="OpenRouteService API key is required. Provide in X-ORS-API-Key header or set ORS_API_KEY environment variable.")
     for trip in trips:
         api_key = trip.get("ors_api_key") or default_api_key
         try:
@@ -29,15 +44,16 @@ async def get_eta(trips: List[Dict[str, Any]]):
                 trip["start_lat"], trip["start_lng"],
                 trip["end_lat"], trip["end_lng"],
                 trip["start_time"], api_key,
-                trip.get("vehicle_key"), trip["key"]
+                trip.get("vehicle_key"), trip["key"],
+                ban_radius_km=x_ban_radius_km, vehicle_speed_kmph=x_vehicle_speed_kmph
             )
             eta_event = next((e for e in result['schedule'] if e['event'] == 'end'), None)
             if not eta_event:
-                results[trip["key"]] = {"error": "ETA calculation failed - no end event found."}
+                results.append({"key": trip["key"], "error": "ETA calculation failed - no end event found."})
             else:
-                results[trip["key"]] = {"eta": eta_event['time']}
+                results.append({"key": trip["key"], "eta": eta_event['time']})
         except Exception as e:
-            results[trip["key"]] = {"error": str(e)}
+            results.append({"key": trip["key"], "error": str(e)})
     return results
 
 class TripItem(BaseModel):

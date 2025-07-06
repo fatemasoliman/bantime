@@ -5,12 +5,13 @@ import openrouteservice
 from datetime import datetime, timedelta, time as dt_time
 from dateutil import tz
 import math
+import folium
 
 # Constants
 BAN_CSV = "ban_times.csv"
-BAN_RADIUS_KM = 50  # Ban area radius in kilometers
+BAN_RADIUS_KM = 20  # Ban area radius in kilometers
 SAUDI_TZ = tz.gettz('Asia/Riyadh')  # Saudi Arabia timezone
-DEFAULT_SPEED_KMPH = 20.0  # Default driving speed
+DEFAULT_SPEED_KMPH = 60.0  # Default driving speed
 
 def haversine(lat1, lon1, lat2, lon2):
     """Calculate the great circle distance between two points on Earth (in km)."""
@@ -26,7 +27,7 @@ def parse_time(tstr):
     h, m = map(int, str(tstr).split(":"))
     return dt_time(h, m)
 
-def point_in_ban_area(lat, lon, ban_lat, ban_lon, radius_km=BAN_RADIUS_KM):
+def point_in_ban_area(lat, lon, ban_lat, ban_lon, radius_km):
     """Check if a point is within the ban area radius."""
     return haversine(lat, lon, ban_lat, ban_lon) <= radius_km
 
@@ -45,13 +46,18 @@ def get_route_from_ors(client, start_lat, start_lon, end_lat, end_lon):
     except Exception as e:
         raise Exception(f"Error fetching route from OpenRouteService: {e}")
 
-def calculate_eta_with_bans(start_lat, start_lon, end_lat, end_lon, start_datetime, ors_api_key, vehicle_key=None, key=None):
+def calculate_eta_with_bans(start_lat, start_lon, end_lat, end_lon, start_datetime, ors_api_key, vehicle_key=None, key=None, ban_radius_km=None, vehicle_speed_kmph=None):
     """
     Calculate ETA considering ban areas along the route.
     This is the unified function used by both CLI and API.
     """
     # Load ban areas
     ban_df = load_ban_areas(BAN_CSV)
+    # Use custom or default ban radius and vehicle speed
+    if ban_radius_km is None:
+        ban_radius_km = BAN_RADIUS_KM
+    if vehicle_speed_kmph is None:
+        vehicle_speed_kmph = DEFAULT_SPEED_KMPH
     
     # Parse and normalize start datetime
     start_dt = datetime.fromisoformat(start_datetime)
@@ -61,7 +67,7 @@ def calculate_eta_with_bans(start_lat, start_lon, end_lat, end_lon, start_dateti
         start_dt = start_dt.astimezone(SAUDI_TZ)
     
     # Get route from OpenRouteService
-    client = openrouteservice.Client(key=ors_api_key)
+    client = openrouteservice.Client(key=ors_api_key, retry_over_query_limit=2)
     route = get_route_from_ors(client, start_lat, start_lon, end_lat, end_lon)
     
     # Extract route geometry
@@ -91,13 +97,13 @@ def calculate_eta_with_bans(start_lat, start_lon, end_lat, end_lon, start_dateti
         
         # Calculate segment distance and travel time
         seg_dist = haversine(p1[1], p1[0], p2[1], p2[0])  # in km
-        seg_time = timedelta(hours=seg_dist / DEFAULT_SPEED_KMPH)
+        seg_time = timedelta(hours=seg_dist / vehicle_speed_kmph)
         eta_to_seg = current_time + seg_time
         
         # Check for ban area encounters at this segment
         ban_hit = False
         for ban in ban_areas:
-            in_ban = point_in_ban_area(p2[1], p2[0], ban['lat'], ban['lon'])
+            in_ban = point_in_ban_area(p2[1], p2[0], ban['lat'], ban['lon'], ban_radius_km)
             eta_weekday = eta_to_seg.strftime('%A')
             
             if in_ban and eta_weekday == ban['day_of_week']:
@@ -142,7 +148,7 @@ def calculate_eta_with_bans(start_lat, start_lon, end_lat, end_lon, start_dateti
     
     # Final check: If end point is inside a ban area during a ban window
     for ban in ban_areas:
-        in_ban = point_in_ban_area(end_lat, end_lon, ban['lat'], ban['lon'])
+        in_ban = point_in_ban_area(end_lat, end_lon, ban['lat'], ban['lon'], ban_radius_km)
         eta_weekday = current_time.strftime('%A')
         
         if in_ban and eta_weekday == ban['day_of_week']:
@@ -243,10 +249,63 @@ def calculate_eta_with_bans(start_lat, start_lon, end_lat, end_lon, start_dateti
     return {
         'eta': current_time,
         'schedule': schedule,
-        'delays': delays
+        'delays': delays,
+        'route_segments': segments
     }
 
-
+def create_route_map(start_lat, start_lon, end_lat, end_lon, delays, segments, output_file="route_map.html"):
+    """Create and save a folium map showing the route and ban stops."""
+    # Center map between start and end
+    mid_lat = (start_lat + end_lat) / 2
+    mid_lon = (start_lon + end_lon) / 2
+    m = folium.Map(location=[mid_lat, mid_lon], zoom_start=6)
+    
+    # Draw route polyline
+    folium.PolyLine(
+        [(lat, lon) for lon, lat in segments], 
+        color="blue", 
+        weight=5, 
+        opacity=0.7
+    ).add_to(m)
+    
+    # Mark start and end
+    folium.Marker(
+        [start_lat, start_lon],
+        popup=f"Start ({start_lat:.4f}, {start_lon:.4f})",
+        icon=folium.Icon(color="green", icon="play")
+    ).add_to(m)
+    
+    folium.Marker(
+        [end_lat, end_lon],
+        popup=f"End ({end_lat:.4f}, {end_lon:.4f})",
+        icon=folium.Icon(color="red", icon="stop")
+    ).add_to(m)
+    
+    # Mark ban stops
+    for d in delays:
+        wait_minutes = int((d['wait'].total_seconds() + 59) // 60)
+        departure_time = (d['eta_at_ban'] + d['wait']).strftime('%Y-%m-%d %H:%M')
+        folium.CircleMarker(
+            location=[d['stop_lat'], d['stop_lon']],
+            radius=14,
+            color="orange",
+            fill=True,
+            fill_color="red",
+            fill_opacity=0.95,
+            tooltip=f"Ban Stop: {d['city']}",
+            popup=folium.Popup(
+                f"<b>Ban Stop: {d['city']}</b><br>"
+                f"Arrival: {d['eta_at_ban'].strftime('%Y-%m-%d %H:%M')}<br>"
+                f"Departure: {departure_time}<br>"
+                f"Wait: {wait_minutes} min<br>"
+                f"Ban Window: {d['ban_start'].strftime('%H:%M')} - {d['ban_end'].strftime('%H:%M')}",
+                max_width=300
+            )
+        ).add_to(m)
+    
+    # Save map
+    m.save(output_file)
+    return output_file
 
 def print_trip_results(result, start_lat, start_lon, end_lat, end_lon, start_datetime):
     """Print formatted trip results for CLI."""
@@ -310,6 +369,14 @@ def main():
             )
             
             print_trip_results(result, args.start_lat, args.start_lon, args.end_lat, args.end_lon, args.start_datetime)
+            
+            # Create and save route map
+            map_file = create_route_map(
+                args.start_lat, args.start_lon, 
+                args.end_lat, args.end_lon,
+                result['delays'], result['route_segments']
+            )
+            print(f"Route map saved as {map_file}. Open this file in your browser to view the route and ban stops.")
             
         except Exception as e:
             print(f"Error: {e}")
