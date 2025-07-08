@@ -5,7 +5,6 @@ import openrouteservice
 from datetime import datetime, timedelta, time as dt_time
 from dateutil import tz
 import math
-import folium
 
 # Constants
 BAN_CSV = "ban_times.csv"
@@ -253,59 +252,6 @@ def calculate_eta_with_bans(start_lat, start_lon, end_lat, end_lon, start_dateti
         'route_segments': segments
     }
 
-def create_route_map(start_lat, start_lon, end_lat, end_lon, delays, segments, output_file="route_map.html"):
-    """Create and save a folium map showing the route and ban stops."""
-    # Center map between start and end
-    mid_lat = (start_lat + end_lat) / 2
-    mid_lon = (start_lon + end_lon) / 2
-    m = folium.Map(location=[mid_lat, mid_lon], zoom_start=6)
-    
-    # Draw route polyline
-    folium.PolyLine(
-        [(lat, lon) for lon, lat in segments], 
-        color="blue", 
-        weight=5, 
-        opacity=0.7
-    ).add_to(m)
-    
-    # Mark start and end
-    folium.Marker(
-        [start_lat, start_lon],
-        popup=f"Start ({start_lat:.4f}, {start_lon:.4f})",
-        icon=folium.Icon(color="green", icon="play")
-    ).add_to(m)
-    
-    folium.Marker(
-        [end_lat, end_lon],
-        popup=f"End ({end_lat:.4f}, {end_lon:.4f})",
-        icon=folium.Icon(color="red", icon="stop")
-    ).add_to(m)
-    
-    # Mark ban stops
-    for d in delays:
-        wait_minutes = int((d['wait'].total_seconds() + 59) // 60)
-        departure_time = (d['eta_at_ban'] + d['wait']).strftime('%Y-%m-%d %H:%M')
-        folium.CircleMarker(
-            location=[d['stop_lat'], d['stop_lon']],
-            radius=14,
-            color="orange",
-            fill=True,
-            fill_color="red",
-            fill_opacity=0.95,
-            tooltip=f"Ban Stop: {d['city']}",
-            popup=folium.Popup(
-                f"<b>Ban Stop: {d['city']}</b><br>"
-                f"Arrival: {d['eta_at_ban'].strftime('%Y-%m-%d %H:%M')}<br>"
-                f"Departure: {departure_time}<br>"
-                f"Wait: {wait_minutes} min<br>"
-                f"Ban Window: {d['ban_start'].strftime('%H:%M')} - {d['ban_end'].strftime('%H:%M')}",
-                max_width=300
-            )
-        ).add_to(m)
-    
-    # Save map
-    m.save(output_file)
-    return output_file
 
 def print_trip_results(result, start_lat, start_lon, end_lat, end_lon, start_datetime):
     """Print formatted trip results for CLI."""
