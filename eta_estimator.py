@@ -45,19 +45,30 @@ def get_route_from_ors(client, start_lat, start_lon, end_lat, end_lon):
     except Exception as e:
         raise Exception(f"Error fetching route from OpenRouteService: {e}")
 
-def calculate_eta_with_bans(start_lat, start_lon, end_lat, end_lon, start_datetime, ors_api_key, vehicle_key=None, key=None, ban_radius_km=None, vehicle_speed_kmph=None):
+def calculate_eta_with_bans(
+    start_lat, start_lon, end_lat, end_lon, start_datetime, ors_api_key,
+    vehicle_key=None, key=None, ban_radius_km=None, vehicle_speed_kmph=None, max_driving_hours=10
+):
     """
-    Calculate ETA considering ban areas along the route.
-    This is the unified function used by both CLI and API.
+    Calculate ETA considering ban areas, max driving hours, and rest stops along the route.
+    Uses OpenRouteService default speeds if vehicle_speed_kmph is not provided.
+    Args:
+        start_lat, start_lon, end_lat, end_lon: Coordinates for route endpoints.
+        start_datetime: ISO string for trip start (with or without timezone).
+        ors_api_key: OpenRouteService API key.
+        ban_radius_km: Radius for ban area checking (default if None).
+        vehicle_speed_kmph: Fixed speed override (if None, use ORS speeds).
+        max_driving_hours: Max allowed driving hours in any 24h window (default 10).
+    Returns:
+        Dict with ETA, delays, and schedule.
     """
+    use_ors_durations = vehicle_speed_kmph is None
+
     # Load ban areas
     ban_df = load_ban_areas(BAN_CSV)
-    # Use custom or default ban radius and vehicle speed
     if ban_radius_km is None:
         ban_radius_km = BAN_RADIUS_KM
-    if vehicle_speed_kmph is None:
-        vehicle_speed_kmph = DEFAULT_SPEED_KMPH
-    
+
     # Parse and normalize start datetime
     start_dt = datetime.fromisoformat(start_datetime)
     if start_dt.tzinfo is None:
@@ -89,31 +100,130 @@ def calculate_eta_with_bans(start_lat, start_lon, end_lat, end_lon, start_dateti
     delays = []
     current_time = start_dt
     last_point = segments[0]
+
+    # --- Resting hours logic ---
+    # Track driving periods (list of tuples: (start_time, end_time, duration))
+    driving_periods = []
+    driving_time_24h = timedelta()  # Cumulative driving time in last 24h
+    window_start_time = current_time  # Start of current 24h window
+    
+    # If using ORS durations, extract them from the ORS response
+    if use_ors_durations:
+        # Try to get segment durations from ORS response
+        properties = route['features'][0]['properties']
+        if 'segments' in properties and properties['segments']:
+            ors_segments = properties['segments'][0]
+            ors_total_duration = ors_segments['duration']  # in seconds
+            ors_total_distance = ors_segments['distance']  # in meters
+        else:
+            # Fallback: use summary fields
+            ors_total_duration = properties.get('summary', {}).get('duration')
+            ors_total_distance = properties.get('summary', {}).get('distance')
+            # If still not found, try top-level
+            if ors_total_duration is None:
+                ors_total_duration = properties.get('duration')
+            if ors_total_distance is None:
+                ors_total_distance = properties.get('distance')
+            if ors_total_duration is None or ors_total_distance is None:
+                raise Exception('Could not find route duration/distance in ORS response.')
+        # Distribute duration proportionally to each segment by distance
+        total_dist = sum(haversine(segments[i-1][1], segments[i-1][0], segments[i][1], segments[i][0]) for i in range(1, len(segments)))
+        # Precompute segment durations
+        seg_durations = []
+        for i in range(1, len(segments)):
+            p1 = segments[i-1]
+            p2 = segments[i]
+            seg_dist = haversine(p1[1], p1[0], p2[1], p2[0])
+            if total_dist > 0:
+                seg_seconds = ors_total_duration * (seg_dist / total_dist)
+            else:
+                seg_seconds = 0
+            seg_durations.append(seg_seconds)
+
     
     for i in range(1, len(segments)):
         p1 = last_point
         p2 = segments[i]
-        
-        # Calculate segment distance and travel time
         seg_dist = haversine(p1[1], p1[0], p2[1], p2[0])  # in km
-        seg_time = timedelta(hours=seg_dist / vehicle_speed_kmph)
-        eta_to_seg = current_time + seg_time
-        
+        if use_ors_durations:
+            seg_time = timedelta(seconds=seg_durations[i-1])
+        else:
+            seg_time = timedelta(hours=seg_dist / vehicle_speed_kmph)
+
+        # --- SPLIT SEGMENT IF IT EXCEEDS MAX DRIVING HOURS ---
+        max_drive_td = timedelta(hours=max_driving_hours)
+        n_splits = max(1, int(seg_time // max_drive_td) + (1 if seg_time % max_drive_td > timedelta(0) else 0))
+        for split_idx in range(n_splits):
+            # For each sub-segment
+            if n_splits == 1:
+                sub_seg_time = seg_time
+                sub_seg_dist = seg_dist
+                sub_p1 = p1
+                sub_p2 = p2
+            else:
+                # Interpolate points for sub-segments
+                sub_seg_time = min(max_drive_td, seg_time - split_idx * max_drive_td)
+                sub_seg_dist = seg_dist * (sub_seg_time / seg_time)
+                frac1 = split_idx / n_splits
+                frac2 = (split_idx + 1) / n_splits
+                sub_p1 = (
+                    p1[0] + (p2[0] - p1[0]) * frac1,
+                    p1[1] + (p2[1] - p1[1]) * frac1
+                )
+                sub_p2 = (
+                    p1[0] + (p2[0] - p1[0]) * frac2,
+                    p1[1] + (p2[1] - p1[1]) * frac2
+                )
+
+            # --- Update rolling 24h window ---
+            driving_periods = [d for d in driving_periods if (current_time - d[0]) < timedelta(hours=24)]
+            driving_time_24h = sum((d[2] for d in driving_periods), timedelta())
+
+            # If adding this sub-segment would exceed max_driving_hours in 24h, insert a 14h rest
+            if driving_time_24h + sub_seg_time > max_drive_td:
+                if driving_periods:
+                    oldest_start = min(d[0] for d in driving_periods)
+                    rest_until = oldest_start + timedelta(hours=24)
+                else:
+                    rest_until = current_time + timedelta(hours=14)
+                rest_time = rest_until - current_time
+                if rest_time < timedelta(hours=14):
+                    rest_time = timedelta(hours=14)
+                delays.append({
+                    'city': 'Rest Stop',
+                    'wait': rest_time,
+                    'ban_start': current_time,
+                    'ban_end': current_time + rest_time,
+                    'eta_at_ban': current_time,
+                    'lat': sub_p2[1],
+                    'lon': sub_p2[0],
+                    'stop_lat': sub_p2[1],
+                    'stop_lon': sub_p2[0]
+                })
+                current_time += rest_time
+                driving_periods = [d for d in driving_periods if (current_time - d[0]) < timedelta(hours=24)]
+                driving_time_24h = sum((d[2] for d in driving_periods), timedelta())
+
+            # Add this sub-segment driving period
+            driving_periods.append((current_time, current_time + sub_seg_time, sub_seg_time))
+            current_time += sub_seg_time
+            last_point = sub_p2
+
         # Check for ban area encounters at this segment
         ban_hit = False
         for ban in ban_areas:
             in_ban = point_in_ban_area(p2[1], p2[0], ban['lat'], ban['lon'], ban_radius_km)
-            eta_weekday = eta_to_seg.strftime('%A')
+            eta_weekday = current_time.strftime('%A')
             
             if in_ban and eta_weekday == ban['day_of_week']:
                 # Calculate ban window for this specific date
                 ban_start = datetime.combine(
-                    eta_to_seg.date(), 
+                    current_time.date(), 
                     parse_time(ban['time_start']), 
                     tzinfo=SAUDI_TZ
                 )
                 ban_end = datetime.combine(
-                    eta_to_seg.date(), 
+                    current_time.date(), 
                     parse_time(ban['time_end']), 
                     tzinfo=SAUDI_TZ
                 )
@@ -123,14 +233,14 @@ def calculate_eta_with_bans(start_lat, start_lon, end_lat, end_lon, start_dateti
                     ban_end += timedelta(days=1)
                 
                 # Check if ETA falls within ban window
-                if ban_start <= eta_to_seg <= ban_end:
-                    wait = ban_end - eta_to_seg
+                if ban_start <= current_time <= ban_end:
+                    wait = ban_end - current_time
                     delays.append({
                         'city': ban['city'],
                         'wait': wait,
                         'ban_start': ban_start,
                         'ban_end': ban_end,
-                        'eta_at_ban': eta_to_seg,
+                        'eta_at_ban': current_time,
                         'lat': ban['lat'],
                         'lon': ban['lon'],
                         'stop_lat': p2[1],
@@ -141,9 +251,12 @@ def calculate_eta_with_bans(start_lat, start_lon, end_lat, end_lon, start_dateti
                     break
         
         if not ban_hit:
-            current_time = eta_to_seg
+            current_time = current_time
         
+        # Record this segment's driving period
+        driving_periods.append((current_time - seg_time, current_time, seg_time))
         last_point = p2
+
     
     # Final check: If end point is inside a ban area during a ban window
     for ban in ban_areas:
