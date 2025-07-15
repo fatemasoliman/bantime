@@ -40,7 +40,14 @@ def get_route_from_ors(client, start_lat, start_lon, end_lat, end_lon):
     """Get route from OpenRouteService API."""
     coords = [(start_lon, start_lat), (end_lon, end_lat)]
     try:
-        route = client.directions(coords, profile='driving-car', format='geojson', instructions=False)
+        # Increase search radius for routable points to 1000 meters
+        route = client.directions(
+            coords,
+            profile='driving-car',
+            format='geojson',
+            instructions=False,
+            radiuses=[1000, 1000]
+        )
         return route
     except Exception as e:
         raise Exception(f"Error fetching route from OpenRouteService: {e}")
