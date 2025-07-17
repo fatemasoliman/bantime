@@ -51,7 +51,13 @@ async def get_eta(
             if not eta_event:
                 results.append({"key": trip["key"], "error": "ETA calculation failed - no end event found."})
             else:
-                results.append({"key": trip["key"], "eta": eta_event['time']})
+                results.append({
+                    "key": trip["key"],
+                    "eta": eta_event['time'],
+                    "speed_used": x_vehicle_speed_kmph,
+                    "ban_radius_km": x_ban_radius_km,
+                    "driving_time_limit": 10  # default or configurable if needed
+                })
         except Exception as e:
             results.append({"key": trip["key"], "error": str(e)})
     return results
