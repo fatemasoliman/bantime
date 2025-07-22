@@ -100,7 +100,8 @@ def calculate_eta_with_bans(
             'lon': float(row['Longitude']),
             'day_of_week': row['Day_of_Week'],
             'time_start': str(row['Time_Start']),
-            'time_end': str(row['Time_End'])
+            'time_end': str(row['Time_End']),
+            'radius': float(row['Radius'])
         })
     
     # Walk along the route, checking for ban area encounters
@@ -219,7 +220,7 @@ def calculate_eta_with_bans(
         # Check for ban area encounters at this segment
         ban_hit = False
         for ban in ban_areas:
-            in_ban = point_in_ban_area(p2[1], p2[0], ban['lat'], ban['lon'], ban_radius_km)
+            in_ban = point_in_ban_area(p2[1], p2[0], ban['lat'], ban['lon'], ban['radius'])
             eta_weekday = current_time.strftime('%A')
             
             if in_ban and eta_weekday == ban['day_of_week']:
@@ -267,7 +268,7 @@ def calculate_eta_with_bans(
     
     # Final check: If end point is inside a ban area during a ban window
     for ban in ban_areas:
-        in_ban = point_in_ban_area(end_lat, end_lon, ban['lat'], ban['lon'], ban_radius_km)
+        in_ban = point_in_ban_area(end_lat, end_lon, ban['lat'], ban['lon'], ban['radius'])
         eta_weekday = current_time.strftime('%A')
         
         if in_ban and eta_weekday == ban['day_of_week']:
