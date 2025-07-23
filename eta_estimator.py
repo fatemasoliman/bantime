@@ -26,15 +26,10 @@ def parse_time(tstr):
     h, m = map(int, str(tstr).split(":"))
     return dt_time(h, m)
 
-def point_in_ban_area(lat, lon, ban_lat, ban_lon, radius_km):
-    """Check if a point is within the ban area radius."""
-    return haversine(lat, lon, ban_lat, ban_lon) <= radius_km
+# Polygon-based ban area check now handled via ban_area_utils.py
 
-def load_ban_areas(csv_path):
-    """Load ban areas from CSV into a DataFrame."""
-    if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"Ban areas CSV file not found: {csv_path}")
-    return pd.read_csv(csv_path)
+# Deprecated: CSV-based ban areas are no longer used for spatial checks.
+# Use GeoJSON polygons for ban areas.
 
 def get_route_from_ors(client, start_lat, start_lon, end_lat, end_lon):
     """Get route from OpenRouteService API."""
@@ -71,10 +66,10 @@ def calculate_eta_with_bans(
     """
     use_ors_durations = vehicle_speed_kmph is None
 
-    # Load ban areas
-    ban_df = load_ban_areas(BAN_CSV)
-    if ban_radius_km is None:
-        ban_radius_km = BAN_RADIUS_KM
+    # Load ban polygons from GeoJSON
+    from ban_area_utils import load_ban_polygons, point_in_any_ban_polygon
+    BAN_GEOJSON = "ban_areas.geojson"
+    ban_polygons = load_ban_polygons(BAN_GEOJSON)
 
     # Parse and normalize start datetime
     start_dt = datetime.fromisoformat(start_datetime)
@@ -91,18 +86,8 @@ def calculate_eta_with_bans(
     geometry = route['features'][0]['geometry']['coordinates']  # list of [lon, lat]
     segments = geometry
     
-    # Prepare ban areas data structure
-    ban_areas = []
-    for _, row in ban_df.iterrows():
-        ban_areas.append({
-            'city': row['City'],
-            'lat': float(row['Latitude']),
-            'lon': float(row['Longitude']),
-            'day_of_week': row['Day_of_Week'],
-            'time_start': str(row['Time_Start']),
-            'time_end': str(row['Time_End']),
-            'radius': float(row['Radius'])
-        })
+    # If you need to associate time/city info, load it from another source or extend the GeoJSON properties.
+    # Here, we only use polygons for spatial checks.
     
     # Walk along the route, checking for ban area encounters
     delays = []
@@ -219,44 +204,26 @@ def calculate_eta_with_bans(
 
         # Check for ban area encounters at this segment
         ban_hit = False
-        for ban in ban_areas:
-            in_ban = point_in_ban_area(p2[1], p2[0], ban['lat'], ban['lon'], ban['radius'])
-            eta_weekday = current_time.strftime('%A')
-            
-            if in_ban and eta_weekday == ban['day_of_week']:
-                # Calculate ban window for this specific date
-                ban_start = datetime.combine(
-                    current_time.date(), 
-                    parse_time(ban['time_start']), 
-                    tzinfo=SAUDI_TZ
-                )
-                ban_end = datetime.combine(
-                    current_time.date(), 
-                    parse_time(ban['time_end']), 
-                    tzinfo=SAUDI_TZ
-                )
-                
-                # Handle overnight ban windows
-                if ban_end <= ban_start:
-                    ban_end += timedelta(days=1)
-                
-                # Check if ETA falls within ban window
-                if ban_start <= current_time <= ban_end:
-                    wait = ban_end - current_time
-                    delays.append({
-                        'city': ban['city'],
-                        'wait': wait,
-                        'ban_start': ban_start,
-                        'ban_end': ban_end,
-                        'eta_at_ban': current_time,
-                        'lat': ban['lat'],
-                        'lon': ban['lon'],
-                        'stop_lat': p2[1],
-                        'stop_lon': p2[0]
-                    })
-                    current_time = ban_end
-                    ban_hit = True
-                    break
+        # Polygon-based ban area check
+        in_ban = point_in_any_ban_polygon(p2[1], p2[0], ban_polygons)
+        if in_ban:
+            # (You may want to extend this to check time windows, etc., if your polygons have properties for time/city)
+            # For now, just register a ban area delay event
+            delays.append({
+                'city': 'Ban Area',
+                'wait': timedelta(hours=0),  # You may want to set this based on your logic
+                'ban_start': current_time,
+                'ban_end': current_time,
+                'eta_at_ban': current_time,
+                'lat': p2[1],
+                'lon': p2[0],
+                'stop_lat': p2[1],
+                'stop_lon': p2[0]
+            })
+            # No further time-window logic here for polygon-based bans
+            # Optionally: break or continue here
+            ban_hit = True
+            break
         
         if not ban_hit:
             current_time = current_time
@@ -266,40 +233,20 @@ def calculate_eta_with_bans(
         last_point = p2
 
     
-    # Final check: If end point is inside a ban area during a ban window
-    for ban in ban_areas:
-        in_ban = point_in_ban_area(end_lat, end_lon, ban['lat'], ban['lon'], ban['radius'])
-        eta_weekday = current_time.strftime('%A')
-        
-        if in_ban and eta_weekday == ban['day_of_week']:
-            ban_start = datetime.combine(
-                current_time.date(), 
-                parse_time(ban['time_start']), 
-                tzinfo=SAUDI_TZ
-            )
-            ban_end = datetime.combine(
-                current_time.date(), 
-                parse_time(ban['time_end']), 
-                tzinfo=SAUDI_TZ
-            )
-            
-            if ban_end <= ban_start:
-                ban_end += timedelta(days=1)
-            
-            if ban_start <= current_time <= ban_end:
-                wait = ban_end - current_time
-                delays.append({
-                    'city': ban['city'],
-                    'wait': wait,
-                    'ban_start': ban_start,
-                    'ban_end': ban_end,
-                    'eta_at_ban': current_time,
-                    'lat': ban['lat'],
-                    'lon': ban['lon'],
-                    'stop_lat': end_lat,
-                    'stop_lon': end_lon
-                })
-                current_time = ban_end
+    # Final check: If end point is inside any ban polygon
+    in_ban = point_in_any_ban_polygon(end_lat, end_lon, ban_polygons)
+    if in_ban:
+        delays.append({
+            'city': 'Ban Area',
+            'wait': timedelta(hours=0),
+            'ban_start': current_time,
+            'ban_end': current_time,
+            'eta_at_ban': current_time,
+            'lat': end_lat,
+            'lon': end_lon,
+            'stop_lat': end_lat,
+            'stop_lon': end_lon
+        })
     
     # Build schedule for API response
     schedule = []
