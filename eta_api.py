@@ -34,35 +34,30 @@ async def get_eta(
     """
     if not trips:
         raise HTTPException(status_code=400, detail="No trips provided.")
-    results = []
+    results = {}
     # Use API key from header, or env as fallback
     default_api_key = x_ors_api_key or os.getenv("ORS_API_KEY")
     if not default_api_key:
         raise HTTPException(status_code=400, detail="OpenRouteService API key is required. Provide in X-ORS-API-Key header or set ORS_API_KEY environment variable.")
     for trip in trips:
-        api_key = trip.get("ors_api_key") or default_api_key
-        try:
-            result = calculate_eta_with_bans(
-                trip["start_lat"], trip["start_lng"],
-                trip["end_lat"], trip["end_lng"],
-                trip["start_time"], api_key,
-                trip.get("vehicle_key"), trip["key"],
-                ban_radius_km=x_ban_radius_km, vehicle_speed_kmph=x_vehicle_speed_kmph,
-                max_driving_hours=x_max_driving_hours
-            )
-            eta_event = next((e for e in result['schedule'] if e['event'] == 'end'), None)
-            if not eta_event:
-                results.append({"key": trip["key"], "error": "ETA calculation failed - no end event found."})
-            else:
-                results.append({
-                    "key": trip["key"],
-                    "eta": eta_event['time'],
-                    "speed_used": x_vehicle_speed_kmph,
-                    "ban_radius_km": x_ban_radius_km,
-                    "driving_time_limit": 10  # default or configurable if needed
-                })
-        except Exception as e:
-            results.append({"key": trip["key"], "error": str(e)})
+        api_key = trip.get("ors_api_key", default_api_key)
+        ban_radius_km = x_ban_radius_km
+        vehicle_speed_kmph = x_vehicle_speed_kmph
+        result = calculate_eta_with_bans(
+            trip["start_lat"], trip["start_lng"], trip["end_lat"], trip["end_lng"],
+            trip["start_time"], api_key,
+            trip.get("vehicle_key"), trip["key"],
+            ban_radius_km=ban_radius_km, vehicle_speed_kmph=vehicle_speed_kmph,
+            max_driving_hours=x_max_driving_hours
+        )
+        eta_event = next((e for e in result['schedule'] if e['event'] == 'end'), None)
+        if not eta_event:
+            raise HTTPException(status_code=500, detail="Could not determine ETA for trip.")
+        delays = [d for d in result.get("delays", [])]
+        results[trip["key"]] = {
+            "eta": eta_event["time"],
+            "delays": delays
+        }
     return results
 
 class TripItem(BaseModel):
