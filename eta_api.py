@@ -22,7 +22,7 @@ async def get_eta(
     x_ban_radius_km: float = Header(None, alias="X-Ban-Radius-Km"),
     x_vehicle_speed_kmph: float = Header(None, alias="X-Vehicle-Speed-Kmph"),
     x_ors_api_key: str = Header(None, alias="X-ORS-API-Key"),
-    x_max_driving_hours: int = Header(10, alias="X-Max-Driving-Hours")
+    x_max_driving_hours: int = Header(14, alias="X-Max-Driving-Hours")
 ):
     """
     Calculate ETAs for a batch of trips. Accepts a list of trip dicts as input.

@@ -49,7 +49,7 @@ def get_route_from_ors(client, start_lat, start_lon, end_lat, end_lon):
 
 def calculate_eta_with_bans(
     start_lat, start_lon, end_lat, end_lon, start_datetime, ors_api_key,
-    vehicle_key=None, key=None, ban_radius_km=None, vehicle_speed_kmph=None, max_driving_hours=10
+    vehicle_key=None, key=None, ban_radius_km=None, vehicle_speed_kmph=None, max_driving_hours=14
 ):
     """
     Calculate ETA considering ban areas, max driving hours, and rest stops along the route.
