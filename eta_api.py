@@ -21,7 +21,8 @@ async def get_eta(
     trips: List[Dict[str, Any]],
     x_ban_radius_km: float = Header(None, alias="X-Ban-Radius-Km"),
     x_vehicle_speed_kmph: float = Header(None, alias="X-Vehicle-Speed-Kmph"),
-    x_ors_api_key: str = Header(None, alias="X-ORS-API-Key")
+    x_ors_api_key: str = Header(None, alias="X-ORS-API-Key"),
+    x_max_driving_hours: int = Header(10, alias="X-Max-Driving-Hours")
 ):
     """
     Calculate ETAs for a batch of trips. Accepts a list of trip dicts as input.
@@ -29,6 +30,7 @@ async def get_eta(
     - X-Ban-Radius-Km: Override ban area radius (km)
     - X-Vehicle-Speed-Kmph: Override vehicle speed (km/h)
     - X-ORS-API-Key: Provide OpenRouteService API key (overrides env var)
+    - X-Max-Driving-Hours: Max allowed driving hours in any 24h window (default 10)
     """
     if not trips:
         raise HTTPException(status_code=400, detail="No trips provided.")
@@ -45,7 +47,8 @@ async def get_eta(
                 trip["end_lat"], trip["end_lng"],
                 trip["start_time"], api_key,
                 trip.get("vehicle_key"), trip["key"],
-                ban_radius_km=x_ban_radius_km, vehicle_speed_kmph=x_vehicle_speed_kmph
+                ban_radius_km=x_ban_radius_km, vehicle_speed_kmph=x_vehicle_speed_kmph,
+                max_driving_hours=x_max_driving_hours
             )
             eta_event = next((e for e in result['schedule'] if e['event'] == 'end'), None)
             if not eta_event:
