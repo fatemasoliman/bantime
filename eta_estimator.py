@@ -8,9 +8,7 @@ import math
 
 # Constants
 BAN_CSV = "ban_times.csv"
-BAN_RADIUS_KM = 20  # Ban area radius in kilometers
 SAUDI_TZ = tz.gettz('Asia/Riyadh')  # Saudi Arabia timezone
-DEFAULT_SPEED_KMPH = 60.0  # Default driving speed
 
 def haversine(lat1, lon1, lat2, lon2):
     """Calculate the great circle distance between two points on Earth (in km)."""
