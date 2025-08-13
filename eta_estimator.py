@@ -195,16 +195,10 @@ def calculate_eta_with_bans(
             driving_periods = [d for d in driving_periods if (current_time - d[0]) < timedelta(hours=24)]
             driving_time_24h = sum((d[2] for d in driving_periods), timedelta())
 
-            # If adding this sub-segment would exceed max_driving_hours in 24h, insert a 14h rest
+            # If adding this sub-segment would exceed max_driving_hours in 24h, insert a rest of (24 - max_driving_hours) hours
             if driving_time_24h + sub_seg_time > max_drive_td:
-                if driving_periods:
-                    oldest_start = min(d[0] for d in driving_periods)
-                    rest_until = oldest_start + timedelta(hours=24)
-                else:
-                    rest_until = current_time + timedelta(hours=14)
-                rest_time = rest_until - current_time
-                if rest_time < timedelta(hours=14):
-                    rest_time = timedelta(hours=14)
+                rest_duration_hours = 24 - max_driving_hours
+                rest_time = timedelta(hours=rest_duration_hours)
                 delays.append({
                     'city': 'Rest Stop',
                     'wait': rest_time,
@@ -353,7 +347,7 @@ def calculate_eta_with_bans(
     
     # Ban events
     for d in delays:
-        wait_minutes = int((d['wait'].total_seconds() + 59) // 60)  # Round up to nearest minute
+        wait_hours = round(d['wait'].total_seconds() / 3600, 2)  # Hours, rounded to 2 decimals
         schedule.append({
             'vehicle_key': vehicle_key,
             'key': key,
@@ -362,7 +356,7 @@ def calculate_eta_with_bans(
             'lat': d['stop_lat'],
             'lon': d['stop_lon'],
             'city': d['city'],
-            'wait_minutes': wait_minutes,
+            'wait_hours': wait_hours,
             'ban_arrival': d['eta_at_ban'].strftime('%Y-%m-%d %H:%M'),
             'ban_departure': (d['eta_at_ban'] + d['wait']).strftime('%Y-%m-%d %H:%M'),
             'ban_lat': d['stop_lat'],
