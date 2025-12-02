@@ -29,18 +29,31 @@ ban_area_manager = BanAreaManager()
 
 # Function to check if a point is in a ban area and get applicable ban times
 
-def get_route_from_ors(client, start_lat, start_lon, end_lat, end_lon):
+def get_route_from_ors(client, start_lat, start_lon, end_lat, end_lon, vehicle_speed_kmph=None):
     """Get route from OpenRouteService API."""
     coords = [(start_lon, start_lat), (end_lon, end_lat)]
     try:
         # Increase search radius for routable points to 1000 meters
-        route = client.directions(
-            coords,
-            profile='driving-car',
-            format='geojson',
-            instructions=False,
-            radiuses=[1000, 1000]
-        )
+        params = {
+            'coordinates': coords,
+            'profile': 'driving-car',
+            'format': 'geojson',
+            'instructions': False,
+            'radiuses': [1000, 1000]
+        }
+
+        # If vehicle speed is provided, pass it to ORS for realistic routing at that speed
+        if vehicle_speed_kmph is not None:
+            params['options'] = {
+                'vehicle_type': 'hgv',
+                'profile_params': {
+                    'restrictions': {
+                        'maximum_speed': vehicle_speed_kmph
+                    }
+                }
+            }
+
+        route = client.request('/v2/directions/driving-car/geojson', {}, post_json=params)
         return route
     except Exception as e:
         raise Exception(f"Error fetching route from OpenRouteService: {e}")
@@ -62,7 +75,8 @@ def calculate_eta_with_bans(
     Returns:
         Dict with ETA, delays, and schedule.
     """
-    use_ors_durations = vehicle_speed_kmph is None
+    # Always use ORS durations now (it will factor in the custom speed if provided)
+    use_ors_durations = True
 
     # Load ban polygons from JSON with day of week and time ranges
     # Use BanAreaManager for ban zone checks
@@ -100,7 +114,7 @@ def calculate_eta_with_bans(
     
     # Get route from OpenRouteService
     client = openrouteservice.Client(key=ors_api_key, retry_over_query_limit=2)
-    route = get_route_from_ors(client, start_lat, start_lon, end_lat, end_lon)
+    route = get_route_from_ors(client, start_lat, start_lon, end_lat, end_lon, vehicle_speed_kmph)
     
     # Extract route geometry
     geometry = route['features'][0]['geometry']['coordinates']  # list of [lon, lat]
