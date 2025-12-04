@@ -111,7 +111,12 @@ def calculate_eta_with_bans(
         start_dt = start_dt.replace(tzinfo=SAUDI_TZ)
     else:
         start_dt = start_dt.astimezone(SAUDI_TZ)
-    
+
+    # Ensure start time is not in the past
+    now = datetime.now(SAUDI_TZ)
+    if start_dt < now:
+        start_dt = now
+
     # Get route from OpenRouteService
     client = openrouteservice.Client(key=ors_api_key, retry_over_query_limit=2)
     route = get_route_from_ors(client, start_lat, start_lon, end_lat, end_lon, vehicle_speed_kmph)
