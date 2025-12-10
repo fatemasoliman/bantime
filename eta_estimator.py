@@ -237,21 +237,25 @@ def calculate_eta_with_bans(
             driving_periods.append((current_time, current_time + sub_seg_time, sub_seg_time))
             driving_time_24h += sub_seg_time
 
-            # Check for ban zones
-            ban_zone = point_in_any_ban_zone_using_manager(sub_p2[1], sub_p2[0], current_time)
+            # Check if we would arrive at a ban zone - check at arrival time, not current time
+            arrival_time = current_time + sub_seg_time
+            ban_zone = point_in_any_ban_zone_using_manager(sub_p2[1], sub_p2[0], arrival_time)
+
             if ban_zone and ban_zone != last_ban_zone:
-                # Calculate wait time until ban ends
-                ban_end_time = current_time.replace(
+                # We would arrive during a ban period - must wait before entering
+                # Calculate when ban ends
+                ban_end_time = arrival_time.replace(
                     hour=ban_zone['time_end'].hour,
                     minute=ban_zone['time_end'].minute,
                     second=0,
                     microsecond=0
                 )
-                
+
                 if ban_zone['time_end'] <= ban_zone['time_start']:
                     # Overnight ban - add one day
                     ban_end_time += timedelta(days=1)
-                
+
+                # Wait at current location until ban ends
                 wait_time = ban_end_time - current_time
                 if wait_time.total_seconds() > 0:  # Only add delay if we need to wait
                     delays.append({
@@ -265,86 +269,15 @@ def calculate_eta_with_bans(
                         'stop_lat': sub_p2[1],
                         'stop_lon': sub_p2[0]
                     })
-                    current_time += wait_time
-                
+                    current_time = ban_end_time
+
                 last_ban_zone = ban_zone
             else:
                 last_ban_zone = None
-            driving_periods.append((current_time, current_time + sub_seg_time, sub_seg_time))
+
+            # Now drive the segment (after any ban wait)
             current_time += sub_seg_time
             last_point = sub_p2
-
-        # Check for ban area encounters at this segment
-        ban_hit = False
-        # Check both start and end points of the segment
-        for point in [p1, p2]:
-            in_ban = point_in_any_ban_zone_using_manager(point[1], point[0], current_time)
-            if in_ban:
-                # Calculate wait time until ban ends
-                ban_end_time = current_time.replace(
-                    hour=in_ban['time_end'].hour,
-                    minute=in_ban['time_end'].minute,
-                    second=0,
-                    microsecond=0
-                )
-                
-                if in_ban['time_end'] <= in_ban['time_start']:
-                    # Overnight ban - add one day
-                    ban_end_time += timedelta(days=1)
-                
-                wait_time = ban_end_time - current_time
-                if wait_time.total_seconds() > 0:
-                    delays.append({
-                        'city': in_ban['city'],
-                        'wait': wait_time,
-                        'ban_start': current_time,
-                        'ban_end': ban_end_time,
-                        'eta_at_ban': current_time,
-                        'lat': point[1],
-                        'lon': point[0],
-                        'stop_lat': point[1],
-                        'stop_lon': point[0]
-                    })
-                    current_time += wait_time
-                    ban_hit = True
-                    break
-        
-        if not ban_hit:
-            current_time = current_time
-        
-        # Record this segment's driving period
-        driving_periods.append((current_time - seg_time, current_time, seg_time))
-        last_point = p2
-
-        # Check additional points along the segment if it's long enough
-        if seg_dist > 10:  # Check every 10km
-            num_points = int(seg_dist / 10)
-            for i in range(1, num_points):
-                frac = i / num_points
-                point = (
-                    p1[0] + (p2[0] - p1[0]) * frac,
-                    p1[1] + (p2[1] - p1[1]) * frac
-                )
-                in_ban = point_in_any_ban_zone_using_manager(point[1], point[0], current_time)
-                if in_ban:
-                    # Calculate wait time until ban ends
-                    ban_end_time = current_time.replace(
-                        hour=in_ban['time_end'].hour,
-                        minute=in_ban['time_end'].minute,
-                        second=0,
-                        microsecond=0
-                    )
-                    
-                    if in_ban['time_end'] <= in_ban['time_start']:
-                        ban_end_time += timedelta(days=1)
-                    
-                    wait_time = ban_end_time - current_time
-                    if wait_time.total_seconds() > 0:
-                        delays.append({
-                            'city': in_ban['city'],
-                            'wait': wait_time,
-                        })
-                        break
     schedule.append({
         'vehicle_key': vehicle_key,
         'key': key,
