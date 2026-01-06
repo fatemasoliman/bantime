@@ -22,7 +22,8 @@ async def get_eta(
     x_ban_radius_km: float = Header(None, alias="X-Ban-Radius-Km"),
     x_vehicle_speed_kmph: float = Header(None, alias="X-Vehicle-Speed-Kmph"),
     x_ors_api_key: str = Header(None, alias="X-ORS-API-Key"),
-    x_max_driving_hours: int = Header(14, alias="X-Max-Driving-Hours")
+    x_max_driving_hours: int = Header(14, alias="X-Max-Driving-Hours"),
+    x_transit_time_multiplier: float = Header(1.3, alias="X-Transit-Time-Multiplier")
 ):
     """
     Calculate ETAs for a batch of trips. Accepts a list of trip dicts as input.
@@ -30,7 +31,8 @@ async def get_eta(
     - X-Ban-Radius-Km: Override ban area radius (km)
     - X-Vehicle-Speed-Kmph: Override vehicle speed (km/h)
     - X-ORS-API-Key: Provide OpenRouteService API key (overrides env var)
-    - X-Max-Driving-Hours: Max allowed driving hours in any 24h window (default 10)
+    - X-Max-Driving-Hours: Max allowed driving hours in any 24h window (default 14)
+    - X-Transit-Time-Multiplier: Multiplier for transit time to account for delays (default 1.3)
     """
     if not trips:
         raise HTTPException(status_code=400, detail="No trips provided.")
@@ -48,7 +50,8 @@ async def get_eta(
             trip["start_time"], api_key,
             trip.get("vehicle_key"), trip["key"],
             ban_radius_km=ban_radius_km, vehicle_speed_kmph=vehicle_speed_kmph,
-            max_driving_hours=x_max_driving_hours
+            max_driving_hours=x_max_driving_hours,
+            transit_time_multiplier=x_transit_time_multiplier
         )
         eta_event = next((e for e in result['schedule'] if e['event'] == 'end'), None)
         if not eta_event:
@@ -74,8 +77,21 @@ class BatchETARequest(BaseModel):
     trips: List[TripItem]
 
 @app.post("/eta/batch")
-def get_eta_batch(batch_req: BatchETARequest):
-    """Calculate ETAs for multiple trips in batch."""
+def get_eta_batch(
+    batch_req: BatchETARequest,
+    x_ban_radius_km: float = Header(None, alias="X-Ban-Radius-Km"),
+    x_vehicle_speed_kmph: float = Header(None, alias="X-Vehicle-Speed-Kmph"),
+    x_max_driving_hours: int = Header(14, alias="X-Max-Driving-Hours"),
+    x_transit_time_multiplier: float = Header(1.3, alias="X-Transit-Time-Multiplier")
+):
+    """
+    Calculate ETAs for multiple trips in batch.
+    Optional headers:
+    - X-Ban-Radius-Km: Override ban area radius (km)
+    - X-Vehicle-Speed-Kmph: Override vehicle speed (km/h)
+    - X-Max-Driving-Hours: Max allowed driving hours in any 24h window (default 14)
+    - X-Transit-Time-Multiplier: Multiplier for transit time to account for delays (default 1.3)
+    """
     results = {}
     trips = batch_req.trips
     if not trips:
@@ -93,7 +109,11 @@ def get_eta_batch(batch_req: BatchETARequest):
                 trip.start_lat, trip.start_lng,
                 trip.end_lat, trip.end_lng,
                 trip.start_time, api_key,
-                trip.vehicle_key, trip.key
+                trip.vehicle_key, trip.key,
+                ban_radius_km=x_ban_radius_km,
+                vehicle_speed_kmph=x_vehicle_speed_kmph,
+                max_driving_hours=x_max_driving_hours,
+                transit_time_multiplier=x_transit_time_multiplier
             )
             eta_event = next((e for e in result['schedule'] if e['event'] == 'end'), None)
             if not eta_event:

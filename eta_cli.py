@@ -4,10 +4,10 @@ import os
 from typing import List, Dict, Any
 from eta_estimator import calculate_eta_with_bans
 
-def process_batch(trips: List[Dict[str, Any]], ban_radius_km=None, vehicle_speed_kmph=None):
+def process_batch(trips: List[Dict[str, Any]], ban_radius_km=None, vehicle_speed_kmph=None, max_driving_hours=14, transit_time_multiplier=1.3):
     """
     Process a batch of trips using the ORS API key from the environment variable.
-    Optionally override ban area radius and vehicle speed.
+    Optionally override ban area radius, vehicle speed, max driving hours, and transit time multiplier.
     """
     results = {}
     if not trips:
@@ -25,7 +25,8 @@ def process_batch(trips: List[Dict[str, Any]], ban_radius_km=None, vehicle_speed
                 trip["start_time"], api_key,
                 trip.get("vehicle_key"), trip["key"],
                 ban_radius_km=ban_radius_km, vehicle_speed_kmph=vehicle_speed_kmph,
-                max_driving_hours=args.max_driving_hours
+                max_driving_hours=max_driving_hours,
+                transit_time_multiplier=transit_time_multiplier
             )
             eta_event = next((e for e in result['schedule'] if e['event'] == 'end'), None)
             if not eta_event:
@@ -43,8 +44,9 @@ def main():
     parser.add_argument('--output', '-o', help='Optional path to output JSON file')
     parser.add_argument('--output-csv', help='Optional path to output CSV file (key and eta columns)')
     parser.add_argument('--ban-radius-km', type=float, help='Override ban area radius in kilometers')
-    parser.add_argument('--max-driving-hours', type=float, default=10, help='Maximum continuous driving hours in a 24h window before mandatory rest')
+    parser.add_argument('--max-driving-hours', type=float, default=14, help='Maximum continuous driving hours in a 24h window before mandatory rest')
     parser.add_argument('--vehicle-speed-kmph', type=float, help='Override vehicle speed in kilometers per hour')
+    parser.add_argument('--transit-time-multiplier', type=float, default=1.3, help='Multiplier for transit time to account for delays (default 1.3)')
     # Single-trip arguments
     parser.add_argument('--start-lat', type=float, help='Start latitude')
     parser.add_argument('--start-lon', type=float, help='Start longitude')
@@ -59,7 +61,7 @@ def main():
     if args.input:
         with open(args.input, 'r') as f:
             trips = json.load(f)
-        results = process_batch(trips, ban_radius_km=args.ban_radius_km, vehicle_speed_kmph=args.vehicle_speed_kmph)
+        results = process_batch(trips, ban_radius_km=args.ban_radius_km, vehicle_speed_kmph=args.vehicle_speed_kmph, max_driving_hours=args.max_driving_hours, transit_time_multiplier=args.transit_time_multiplier)
         print(json.dumps(results, indent=2, ensure_ascii=False))
         if args.output:
             with open(args.output, 'w') as f:
@@ -86,7 +88,8 @@ def main():
             args.start_datetime, ors_api_key,
             ban_radius_km=args.ban_radius_km,
             vehicle_speed_kmph=args.vehicle_speed_kmph,
-            max_driving_hours=args.max_driving_hours
+            max_driving_hours=args.max_driving_hours,
+            transit_time_multiplier=args.transit_time_multiplier
         )
         # Convert timedelta in delays to minutes for JSON serialization
         delays_serializable = []

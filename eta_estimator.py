@@ -60,7 +60,8 @@ def get_route_from_ors(client, start_lat, start_lon, end_lat, end_lon, vehicle_s
 
 def calculate_eta_with_bans(
     start_lat, start_lon, end_lat, end_lon, start_datetime, ors_api_key,
-    vehicle_key=None, key=None, ban_radius_km=None, vehicle_speed_kmph=None, max_driving_hours=14
+    vehicle_key=None, key=None, ban_radius_km=None, vehicle_speed_kmph=None, max_driving_hours=14,
+    transit_time_multiplier=1.3
 ):
     """
     Calculate ETA considering ban areas, max driving hours, and rest stops along the route.
@@ -71,7 +72,8 @@ def calculate_eta_with_bans(
         ors_api_key: OpenRouteService API key.
         ban_radius_km: Radius for ban area checking (default if None).
         vehicle_speed_kmph: Fixed speed override (if None, use ORS speeds).
-        max_driving_hours: Max allowed driving hours in any 24h window (default 10).
+        max_driving_hours: Max allowed driving hours in any 24h window (default 14).
+        transit_time_multiplier: Multiplier for transit time to account for delays (default 1.3).
     Returns:
         Dict with ETA, delays, and schedule.
     """
@@ -161,6 +163,10 @@ def calculate_eta_with_bans(
                 ors_total_distance = properties.get('distance')
             if ors_total_duration is None or ors_total_distance is None:
                 raise Exception('Could not find route duration/distance in ORS response.')
+
+        # Apply transit time multiplier to account for realistic delays
+        ors_total_duration = ors_total_duration * transit_time_multiplier
+
         # Distribute duration proportionally to each segment by distance
         total_dist = sum(haversine(segments[i-1][1], segments[i-1][0], segments[i][1], segments[i][0]) for i in range(1, len(segments)))
         # Precompute segment durations
