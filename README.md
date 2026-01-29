@@ -210,11 +210,3 @@ A truck departing Riyadh at 08:00 heading to Jeddah:
 ## Environment Variables
 
 - `ORS_API_KEY`: OpenRouteService API key (required)
-
-## License
-
-[Add your license here]
-
-## Contributing
-
-[Add contribution guidelines here]
