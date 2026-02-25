@@ -29,7 +29,7 @@ ban_area_manager = BanAreaManager()
 
 # Function to check if a point is in a ban area and get applicable ban times
 
-def get_route_from_ors(client, start_lat, start_lon, end_lat, end_lon, vehicle_speed_kmph=None):
+def get_route_from_ors(client, start_lat, start_lon, end_lat, end_lon, vehicle_speed_kmph=None, departure_time=None):
     """Get route from OpenRouteService API."""
     coords = [(start_lon, start_lat), (end_lon, end_lat)]
     try:
@@ -41,6 +41,11 @@ def get_route_from_ors(client, start_lat, start_lon, end_lat, end_lon, vehicle_s
             'instructions': False,
             'radiuses': [1000, 1000]
         }
+
+        # If departure time is provided, pass it to ORS for time-based routing
+        if departure_time is not None:
+            # Format as ISO 8601 string with timezone
+            params['departure'] = departure_time.isoformat()
 
         # If vehicle speed is provided, pass it to ORS for realistic routing at that speed
         if vehicle_speed_kmph is not None:
@@ -121,7 +126,7 @@ def calculate_eta_with_bans(
 
     # Get route from OpenRouteService
     client = openrouteservice.Client(key=ors_api_key, retry_over_query_limit=2)
-    route = get_route_from_ors(client, start_lat, start_lon, end_lat, end_lon, vehicle_speed_kmph)
+    route = get_route_from_ors(client, start_lat, start_lon, end_lat, end_lon, vehicle_speed_kmph, departure_time=start_dt)
     
     # Extract route geometry
     geometry = route['features'][0]['geometry']['coordinates']  # list of [lon, lat]
