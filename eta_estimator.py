@@ -36,7 +36,7 @@ def get_route_from_ors(client, start_lat, start_lon, end_lat, end_lon, vehicle_s
         # Increase search radius for routable points to 1000 meters
         params = {
             'coordinates': coords,
-            'profile': 'driving-car',
+            'profile': 'driving-hgv',
             'format': 'geojson',
             'instructions': False,
             'radiuses': [1000, 1000]
@@ -53,7 +53,7 @@ def get_route_from_ors(client, start_lat, start_lon, end_lat, end_lon, vehicle_s
                 }
             }
 
-        route = client.request('/v2/directions/driving-car/geojson', {}, post_json=params)
+        route = client.request('/v2/directions/driving-hgv/geojson', {}, post_json=params)
         return route
     except Exception as e:
         raise Exception(f"Error fetching route from OpenRouteService: {e}")
@@ -191,99 +191,76 @@ def calculate_eta_with_bans(
         else:
             seg_time = timedelta(hours=seg_dist / vehicle_speed_kmph)
 
-        # --- SPLIT SEGMENT IF IT EXCEEDS MAX DRIVING HOURS ---
         max_drive_td = timedelta(hours=max_driving_hours)
-        n_splits = max(1, int(seg_time // max_drive_td) + (1 if seg_time % max_drive_td > timedelta(0) else 0))
-        for split_idx in range(n_splits):
-            # For each sub-segment
-            if n_splits == 1:
-                sub_seg_time = seg_time
-                sub_seg_dist = seg_dist
-                sub_p1 = p1
-                sub_p2 = p2
-            else:
-                # Interpolate points for sub-segments
-                sub_seg_time = min(max_drive_td, seg_time - split_idx * max_drive_td)
-                sub_seg_dist = seg_dist * (sub_seg_time / seg_time)
-                frac1 = split_idx / n_splits
-                frac2 = (split_idx + 1) / n_splits
-                sub_p1 = (
-                    p1[0] + (p2[0] - p1[0]) * frac1,
-                    p1[1] + (p2[1] - p1[1]) * frac1
-                )
-                sub_p2 = (
-                    p1[0] + (p2[0] - p1[0]) * frac2,
-                    p1[1] + (p2[1] - p1[1]) * frac2
-                )
 
-            # --- Update rolling 24h window ---
+        # --- Update rolling 24h window ---
+        driving_periods = [d for d in driving_periods if (current_time - d[0]) < timedelta(hours=24)]
+        driving_time_24h = sum((d[2] for d in driving_periods), timedelta())
+
+        # If adding this segment would exceed max_driving_hours in 24h, insert a rest of (24 - max_driving_hours) hours
+        if driving_time_24h + seg_time > max_drive_td:
+            rest_duration_hours = 24 - max_driving_hours
+            rest_time = timedelta(hours=rest_duration_hours)
+            delays.append({
+                'city': 'Rest Stop',
+                'wait': rest_time,
+                'ban_start': current_time,
+                'ban_end': current_time + rest_time,
+                'eta_at_ban': current_time,
+                'lat': p2[1],
+                'lon': p2[0],
+                'stop_lat': p2[1],
+                'stop_lon': p2[0]
+            })
+            current_time += rest_time
             driving_periods = [d for d in driving_periods if (current_time - d[0]) < timedelta(hours=24)]
             driving_time_24h = sum((d[2] for d in driving_periods), timedelta())
 
-            # If adding this sub-segment would exceed max_driving_hours in 24h, insert a rest of (24 - max_driving_hours) hours
-            if driving_time_24h + sub_seg_time > max_drive_td:
-                rest_duration_hours = 24 - max_driving_hours
-                rest_time = timedelta(hours=rest_duration_hours)
+        # Add this segment driving period
+        driving_periods.append((current_time, current_time + seg_time, seg_time))
+        driving_time_24h += seg_time
+
+        # Check if we would arrive at a ban zone - check at arrival time, not current time
+        arrival_time = current_time + seg_time
+        ban_zone = point_in_any_ban_zone_using_manager(p2[1], p2[0], arrival_time)
+
+        if ban_zone and ban_zone != last_ban_zone:
+            # We would arrive during a ban period - must wait before entering
+            # Calculate when ban ends
+            ban_end_time = arrival_time.replace(
+                hour=ban_zone['time_end'].hour,
+                minute=ban_zone['time_end'].minute,
+                second=0,
+                microsecond=0
+            )
+
+            if ban_zone['time_end'] <= ban_zone['time_start']:
+                # Overnight ban - add one day
+                ban_end_time += timedelta(days=1)
+
+            # Wait at current location until ban ends
+            wait_time = ban_end_time - current_time
+            if wait_time.total_seconds() > 0:  # Only add delay if we need to wait
                 delays.append({
-                    'city': 'Rest Stop',
-                    'wait': rest_time,
+                    'city': ban_zone['city'],
+                    'wait': wait_time,
                     'ban_start': current_time,
-                    'ban_end': current_time + rest_time,
+                    'ban_end': ban_end_time,
                     'eta_at_ban': current_time,
-                    'lat': sub_p2[1],
-                    'lon': sub_p2[0],
-                    'stop_lat': sub_p2[1],
-                    'stop_lon': sub_p2[0]
+                    'lat': p2[1],
+                    'lon': p2[0],
+                    'stop_lat': p2[1],
+                    'stop_lon': p2[0]
                 })
-                current_time += rest_time
-                driving_periods = [d for d in driving_periods if (current_time - d[0]) < timedelta(hours=24)]
-                driving_time_24h = sum((d[2] for d in driving_periods), timedelta())
+                current_time = ban_end_time
 
-            # Add this sub-segment driving period
-            driving_periods.append((current_time, current_time + sub_seg_time, sub_seg_time))
-            driving_time_24h += sub_seg_time
+            last_ban_zone = ban_zone
+        else:
+            last_ban_zone = None
 
-            # Check if we would arrive at a ban zone - check at arrival time, not current time
-            arrival_time = current_time + sub_seg_time
-            ban_zone = point_in_any_ban_zone_using_manager(sub_p2[1], sub_p2[0], arrival_time)
-
-            if ban_zone and ban_zone != last_ban_zone:
-                # We would arrive during a ban period - must wait before entering
-                # Calculate when ban ends
-                ban_end_time = arrival_time.replace(
-                    hour=ban_zone['time_end'].hour,
-                    minute=ban_zone['time_end'].minute,
-                    second=0,
-                    microsecond=0
-                )
-
-                if ban_zone['time_end'] <= ban_zone['time_start']:
-                    # Overnight ban - add one day
-                    ban_end_time += timedelta(days=1)
-
-                # Wait at current location until ban ends
-                wait_time = ban_end_time - current_time
-                if wait_time.total_seconds() > 0:  # Only add delay if we need to wait
-                    delays.append({
-                        'city': ban_zone['city'],
-                        'wait': wait_time,
-                        'ban_start': current_time,
-                        'ban_end': ban_end_time,
-                        'eta_at_ban': current_time,
-                        'lat': sub_p2[1],
-                        'lon': sub_p2[0],
-                        'stop_lat': sub_p2[1],
-                        'stop_lon': sub_p2[0]
-                    })
-                    current_time = ban_end_time
-
-                last_ban_zone = ban_zone
-            else:
-                last_ban_zone = None
-
-            # Now drive the segment (after any ban wait)
-            current_time += sub_seg_time
-            last_point = sub_p2
+        # Now drive the segment (after any ban wait)
+        current_time += seg_time
+        last_point = p2
     schedule.append({
         'vehicle_key': vehicle_key,
         'key': key,
